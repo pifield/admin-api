@@ -29,6 +29,14 @@ module.exports = function(app) {
   );
 
   app.route(
+    versionConfig.routePrefix + '/templates/draft'
+  ).post(
+    AuthMiddleware.isAuthorizedJWT,
+    TemplateValidator.validateCreateDraftTemplateData,
+    TemplateCtrl.createDraftTemplate
+  );
+
+  app.route(
     versionConfig.routePrefix + '/templates/:templateId'
   ).patch(
     AuthMiddleware.isAuthorizedJWT,

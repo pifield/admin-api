@@ -252,7 +252,13 @@ const importTemplatesSchema = Joi.object().keys({
   templates: Joi.array().items(importTemplateObjectSchema).min(1).max(50).required()
 });
 
+const createDraftTemplateSchema = Joi.object().keys({
+  template_name: Joi.string().max(255).required()
+});
+
 exports.createTemplateSchema = createTemplateSchema;
+exports.createDraftTemplateSchema = createDraftTemplateSchema;
+
 exports.updateTemplateSchema = updateTemplateSchema;
 exports.bulkArchiveTemplatesSchema = bulkArchiveTemplatesSchema;
 exports.bulkUnarchiveTemplatesSchema = bulkUnarchiveTemplatesSchema;

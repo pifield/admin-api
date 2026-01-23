@@ -305,6 +305,26 @@ exports.listTemplates = async function(req, res) {
         } else {
           template.r2_url = template.cf_r2_url;
         }
+
+        // Generate R2 URL for color video
+        if (template.color_video_key) {
+          template.color_video_r2_url = `${config.os2.r2.public.bucketUrl}/${template.color_video_key}`;
+        }
+
+        // Generate R2 URL for mask video
+        if (template.mask_video_key) {
+          template.mask_video_r2_url = `${config.os2.r2.public.bucketUrl}/${template.mask_video_key}`;
+        }
+
+        // Generate R2 URL for bodymovin json
+        if (template.bodymovin_json_key) {
+          template.bodymovin_json_r2_url = `${config.os2.r2.public.bucketUrl}/${template.bodymovin_json_key}`;
+        }
+
+        // Generate R2 URL for thumbnail frame
+        if (template.thumb_frame_asset_key) {
+          template.thumb_frame_url = `${config.os2.r2.public.bucketUrl}/${template.thumb_frame_asset_key}`;
+        }
         
         // Load AI clips for all templates (from pre-fetched data)
         template.clips = clipsMap.get(template.template_id) || [];
@@ -1089,6 +1109,51 @@ async function processNewFieldsWithNicheSlug(customTextInputFields, nicheSlug) {
     });
   }
 }
+
+/**
+ * @api {post} /templates/draft Create draft template
+ * @apiVersion 1.0.0
+ * @apiName CreateDraftTemplate
+ * @apiGroup Templates
+ * @apiPermission JWT
+ *
+ * @apiBody {String} template_name Template name
+ */
+exports.createDraftTemplate = async function(req, res) {
+  try {
+    const { template_name } = req.validatedBody;
+    
+    // Generate a unique template code based on name + random suffix
+    // Take first 4 chars of name (or less), uppercase, remove special chars
+    const namePrefix = template_name.replace(/[^a-zA-Z0-9]/g, '').substring(0, 4).toUpperCase();
+    const randomSuffix = Math.floor(10 + Math.random() * 90); // 2 digit random number
+    const template_code = `${namePrefix}${randomSuffix}`;
+
+    const templateData = {
+      template_id: uuidv4(),
+      template_name,
+      template_code,
+      template_output_type: 'image', // Default
+      template_clips_assets_type: 'non-ai', // Default
+      template_gender: 'unisex', // Default
+      prompt: '', // Default empty
+      credits: 1, // Default
+      is_draft: true,
+      created_at: new Date()
+    };
+
+    await TemplateModel.createTemplate(templateData);
+
+    return res.status(HTTP_STATUS_CODES.CREATED).json({
+      message: req.t('template:TEMPLATE_CREATED_SUCCESSFULLY'),
+      data: templateData
+    });
+
+  } catch (error) {
+    logger.error('Error creating draft template:', { error: error.message, stack: error.stack });
+    TemplateErrorHandler.handleTemplateErrors(error, res);
+  }
+};
 
 /**
  * @api {post} /templates Create template
