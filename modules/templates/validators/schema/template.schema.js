@@ -253,6 +253,7 @@ const updateTemplateSchema = Joi.object().keys({
   text_fit_groups: Joi.array().items(textFitGroupSchema).allow(null).optional(),
   android_status: Joi.string().valid('active', 'inactive').optional(),
   ios_status: Joi.string().valid('active', 'inactive').optional(),
+  web_status: Joi.string().valid('active', 'inactive').optional(),
   template_tag_ids: Joi.array().items(templateTagSchema).allow(null).optional(),
   image_uploads_required: Joi.number().integer().min(0).optional(),
   video_uploads_required: Joi.number().integer().min(0).optional(),
@@ -279,7 +280,9 @@ const updateTemplateSchema = Joi.object().keys({
       clip_index: Joi.number().integer().min(0).allow(null).optional(),
       is_optional: Joi.boolean().optional(),
       step_index: Joi.number().integer().min(0).optional(),
-      gender: Joi.string().valid('male', 'female', 'unisex', 'couple').optional()
+      gender: Joi.string().valid('male', 'female', 'unisex', 'couple').optional(),
+      layer_time_start_sec: Joi.number().allow(null).optional(),
+      layer_time_end_sec: Joi.number().allow(null).optional()
     })
   ).allow(null).optional(),
   image_input_fields_json: Joi.array().items(

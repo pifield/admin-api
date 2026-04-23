@@ -3,10 +3,26 @@
 const OrdersModel = require('../models/orders.model');
 const GenerationsModel = require('../../generations/models/generations.model');
 
-function purchaseCategoryFromPlanType(planType) {
-  if (planType === 'single') return 'alacarte';
-  if (planType === 'addon') return 'addon';
-  if (planType === 'bundle' || planType === 'credits') return 'subscription';
+function normPlanField(v) {
+  if (v == null || v === '') return '';
+  const s = typeof Buffer !== 'undefined' && Buffer.isBuffer(v) ? v.toString('utf8') : String(v);
+  return s.trim().toLowerCase();
+}
+
+/**
+ * Badge bucket — payment_plans.plan_type + billing_interval (orders list JOIN).
+ * Credits: only monthly|yearly are subscriptions; all other credit packs (onetime, NULL, legacy rows) are one-time.
+ * alacarte: single|bundle + alacarte · addon: addon + onetime
+ */
+function purchaseCategoryFromPlan(planType, billingInterval) {
+  const pt = normPlanField(planType);
+  const bi = normPlanField(billingInterval);
+  if (pt === 'credits') {
+    if (bi === 'monthly' || bi === 'yearly') return 'subscription';
+    return 'onetime';
+  }
+  if ((pt === 'single' || pt === 'bundle') && bi === 'alacarte') return 'alacarte';
+  if (pt === 'addon' && bi === 'onetime') return 'addon';
   return 'other';
 }
 
@@ -24,8 +40,9 @@ exports.listAdminOrders = async function (req, res) {
     const status = req.query.status ? String(req.query.status).trim() : '';
     const productType = req.query.product_type ? String(req.query.product_type).trim() : '';
     const search = req.query.search ? String(req.query.search).trim() : '';
+    const client_platform = req.query.client_platform ? String(req.query.client_platform).trim().toLowerCase() : '';
 
-    const filterPayload = { status, productType, search };
+    const filterPayload = { status, productType, search, client_platform };
 
     const [total, rows] = await Promise.all([
       OrdersModel.countOrdersAdmin(filterPayload),
@@ -43,6 +60,7 @@ exports.listAdminOrders = async function (req, res) {
       order_id: o.order_id,
       user_id: o.user_id,
       payment_gateway: o.payment_gateway,
+      client_platform: o.client_platform ?? null,
       pg_order_id: o.pg_order_id,
       quantity: o.quantity,
       pg_payment_id: o.pg_payment_id,
@@ -59,7 +77,7 @@ exports.listAdminOrders = async function (req, res) {
       plan_name: o.plan_name ?? null,
       plan_heading: o.plan_heading ?? null,
       billing_interval: o.billing_interval ?? null,
-      purchase_category: purchaseCategoryFromPlanType(o.plan_type),
+      purchase_category: purchaseCategoryFromPlan(o.plan_type, o.billing_interval),
       user_details: userById[o.user_id] || null
     }));
 

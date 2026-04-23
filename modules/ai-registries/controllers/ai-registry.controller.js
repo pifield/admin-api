@@ -103,8 +103,14 @@ exports.list = async function (req, res) {
 
     const models = await aiRegistryModel.listAiModels(searchParams, paginationParams);
 
+    // Get fallback models
+    const fallbackAmrIds = _.compact(_.uniq(models.map(m => m.fallback_amr_id)));
+    const fallbackModels = await aiRegistryModel.getAiModelsByIds(fallbackAmrIds);
+
     // Stitch Providers
-    const ampIds = _.uniq(models.map(m => m.amp_id));
+    const primaryAmpIds = models.map(m => m.amp_id);
+    const fallbackAmpIds = fallbackModels.map(m => m.amp_id);
+    const ampIds = _.uniq([...primaryAmpIds, ...fallbackAmpIds]);
     const providers = await aiRegistryModel.getProvidersByIds(ampIds);
 
     // Batch generate presigned URLs for logos
@@ -141,6 +147,8 @@ exports.list = async function (req, res) {
       };
     }), 'amp_id');
 
+    const fallbackModelsMap = _.keyBy(fallbackModels, 'amr_id');
+
     const result = models.map(model => {
       // Ensure pricing_config is returned as a proper JSON object, not a string
       let parsedPricingConfig = model.pricing_config;
@@ -158,12 +166,21 @@ exports.list = async function (req, res) {
         try { parsedFallbackMapping = JSON.parse(parsedFallbackMapping); } catch (e) { parsedFallbackMapping = null; }
       }
 
+      const fallbackModelRaw = fallbackModelsMap[model.fallback_amr_id] || null;
+      const fallback_model = fallbackModelRaw ? {
+        amr_id: fallbackModelRaw.amr_id,
+        name: fallbackModelRaw.name,
+        version: fallbackModelRaw.version,
+        provider: providersMap[fallbackModelRaw.amp_id] || null
+      } : null;
+
       return {
         ...model,
         pricing_config: parsedPricingConfig,
         parameter_schema: parsedParameterSchema,
         fallback_mapping: parsedFallbackMapping,
-        provider: providersMap[model.amp_id] || null
+        provider: providersMap[model.amp_id] || null,
+        fallback_model
       };
     });
 
@@ -279,18 +296,27 @@ exports.create = async function (req, res) {
     const amrId = result.insertId;
 
     if (req.body.tags !== undefined) {
-      const amtdIds = Array.isArray(req.body.tags)
-        ? req.body.tags.map(t => (typeof t === 'object' && t != null && t.amtd_id != null) ? t.amtd_id : t).filter(Boolean)
-        : [];
-      await aiRegistryModel.setTagsForAmrId(amrId, amtdIds);
+      try {
+        const amtdIds = Array.isArray(req.body.tags)
+          ? req.body.tags.map(t => (typeof t === 'object' && t != null && t.amtd_id != null) ? t.amtd_id : t).filter(Boolean)
+          : [];
+        await aiRegistryModel.setTagsForAmrId(amrId, amtdIds);
+      } catch (tagErr) {
+        console.error('AI model created but tags failed (amr_id=%s):', amrId, tagErr);
+      }
     }
 
-    await publishNewAdminActivityLog({
-      adminUserId: req.user.userId,
-      entityType: 'AI_REGISTRY',
-      actionName: 'CREATE_AI_REGISTRY_MODEL',
-      entityId: amrId
-    });
+    // Do not fail the HTTP response after DB commit if Kafka / activity log is unavailable.
+    try {
+      await publishNewAdminActivityLog({
+        adminUserId: req.user.userId,
+        entityType: 'AI_REGISTRY',
+        actionName: 'CREATE_AI_REGISTRY_MODEL',
+        entityId: amrId
+      });
+    } catch (logErr) {
+      console.error('AI model created but activity log publish failed (amr_id=%s):', amrId, logErr);
+    }
     return res.status(HTTP_STATUS_CODES.CREATED).json({ amr_id: amrId, ...newModelData });
   } catch (err) {
     console.error('Error creating AI model:', err);
@@ -707,12 +733,16 @@ exports.createIoDefinition = async function (req, res) {
       amr_id: req.params.amrId // Ensure it links to the current model
     };
     const result = await aiRegistryModel.createIoDefinition(data);
-    await publishNewAdminActivityLog({
-      adminUserId: req.user.userId,
-      entityType: 'AI_REGISTRY_IO',
-      actionName: 'CREATE_AI_REGISTRY_IO',
-      entityId: result.insertId
-    });
+    try {
+      await publishNewAdminActivityLog({
+        adminUserId: req.user.userId,
+        entityType: 'AI_REGISTRY_IO',
+        actionName: 'CREATE_AI_REGISTRY_IO',
+        entityId: result.insertId
+      });
+    } catch (logErr) {
+      console.error('IO definition created but activity log publish failed (amiod_id=%s):', result.insertId, logErr);
+    }
     return res.status(HTTP_STATUS_CODES.CREATED).json({ amiod_id: result.insertId, ...data });
   } catch (err) {
     console.error('Error creating IO definition:', err);
