@@ -109,7 +109,9 @@ const techHealthAnalyticsSchema = Joi.object().keys({
   start_date: Joi.date().iso().required(),
   end_date: Joi.date().iso().min(Joi.ref('start_date')).required(),
   tz: Joi.string().optional(),
-  limit: Joi.number().integer().min(1).max(100).optional()
+  limit: Joi.number().integer().min(1).max(100).optional(),
+  /** Mobile sends X-Device-OS as `android` | `ios` (see device headers). */
+  platform: Joi.string().valid('android', 'ios').optional()
 });
 
 /**
@@ -184,8 +186,12 @@ const ordersFunnelClickhouseSchema = Joi.object().keys({
   app_version: Joi.string().max(64).optional().allow('')
 });
 
+/** Growth overview: same date + tz semantics as orders-funnel ClickHouse routes. */
+const growthMetricsOverviewSchema = ordersFunnelClickhouseSchema;
+
 exports.dateRangeSchema = dateRangeSchema;
 exports.ordersFunnelClickhouseSchema = ordersFunnelClickhouseSchema;
+exports.growthMetricsOverviewSchema = growthMetricsOverviewSchema;
 exports.characterAnalyticsSchema = characterAnalyticsSchema;
 exports.templateAnalyticsSchema = templateAnalyticsSchema;
 exports.templateTopByGenerationSchema = templateTopByGenerationSchema;

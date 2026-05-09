@@ -1,10 +1,12 @@
 'use strict';
 
 const OrdersModel = require('../models/orders.model');
+const GooglePlayOrphanModel = require('../models/google-play-orphan.model');
 const PaymentPlansModel = require('../../payment-plans/models/payment-plans.model');
 const GenerationsModel = require('../../generations/models/generations.model');
 const orderTemplateStitch = require('../utils/orderTemplateStitch.util');
 const orderLifecycleAnalyticsEnrichment = require('../utils/ordersLifecycleAnalyticsEnrichment.util');
+const GooglePlayOrderSyncService = require('../services/google-play-order-sync.service');
 
 function normPlanField(v) {
   if (v == null || v === '') return '';
@@ -272,10 +274,52 @@ exports.listAdminOrders = async function (req, res) {
 
     const preparedFilters = await OrdersModel.prepareAdminOrdersFilters(filterPayload);
 
-    const [total, rows] = await Promise.all([
+    const tzRaw = req.query.tz != null ? String(req.query.tz).trim() : '';
+    const summaryTz =
+      tzRaw && TimezoneService.isValidTimezone(tzRaw)
+        ? tzRaw
+        : TimezoneService.getDefaultTimezone();
+
+    const [total, rows, distinctUsersResult] = await Promise.all([
       OrdersModel.countOrdersAdmin(preparedFilters),
-      OrdersModel.listOrdersAdmin({ ...preparedFilters, limit, offset })
+      OrdersModel.listOrdersAdmin({ ...preparedFilters, limit, offset }),
+      page === 1 ? OrdersModel.countDistinctUsersAdmin(preparedFilters) : Promise.resolve(null)
     ]);
+
+    /** Local calendar days represented on this page (usually 1–5); stats run only for these UTC day windows. */
+    const dayKeySet = new Set();
+    for (const r of rows || []) {
+      const k = OrdersModel.calendarDayKeyFromCreatedAt(r.created_at, summaryTz);
+      if (k) dayKeySet.add(k);
+    }
+    const dayKeys = [...dayKeySet].sort((a, b) => b.localeCompare(a));
+
+    let summary;
+    if (dayKeys.length > 0) {
+      const dayAgg = await OrdersModel.summarizeAdminOrdersForCalendarDays(
+        preparedFilters,
+        summaryTz,
+        dayKeys
+      );
+      if (page === 1) {
+        summary = {
+          unique_users: distinctUsersResult,
+          distinct_calendar_days: dayAgg.distinct_calendar_days,
+          orders_by_calendar_day: dayAgg.orders_by_calendar_day
+        };
+      } else {
+        summary = {
+          orders_by_calendar_day: dayAgg.orders_by_calendar_day,
+          distinct_calendar_days: dayAgg.distinct_calendar_days
+        };
+      }
+    } else if (page === 1) {
+      summary = {
+        unique_users: distinctUsersResult,
+        distinct_calendar_days: 0,
+        orders_by_calendar_day: []
+      };
+    }
 
     const { planById, userById } = await stitchPlansAndUsersForRows(rows);
     const templateNameById = await orderTemplateStitch.buildTemplateNameByIdMap(rows);
@@ -285,19 +329,161 @@ exports.listAdminOrders = async function (req, res) {
       return orderLifecycleAnalyticsEnrichment.applyLifecycleContextToOrderPayload(base, ctxMap);
     });
 
+    const payload = {
+      orders,
+      page,
+      limit,
+      total,
+      has_more: offset + orders.length < total
+    };
+    if (summary) {
+      payload.summary = summary;
+    }
+
     return res.status(200).json({
-      data: {
-        orders,
-        page,
-        limit,
-        total,
-        has_more: offset + orders.length < total
-      }
+      data: payload
     });
   } catch (err) {
     console.error('listAdminOrders error:', err);
     return res.status(500).json({
       message: 'Failed to list orders'
+    });
+  }
+};
+
+/**
+ * GET /admin/orders/play-store — Orphan reconciliation queue (photobop-api writes `google_play_orphan_events`).
+ * For each row: batch `orders.get` first when `play_order_id` exists, then stitch a matching internal order if any (by `pg_order_id` or `pg_payment_id` = purchase token).
+ */
+exports.listAdminPlayStoreOrders = async function (req, res) {
+  try {
+    const limitRaw = parseInt(req.query.limit, 10);
+    const pageRaw = parseInt(req.query.page, 10);
+    const limit = Math.min(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20, 100);
+    const page = Math.max(Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1, 1);
+    const offset = (page - 1) * limit;
+
+    const [total, orphanRows] = await Promise.all([
+      GooglePlayOrphanModel.countOrphansAdmin(),
+      GooglePlayOrphanModel.listOrphansAdmin({ limit, offset })
+    ]);
+
+    const pgIds = orphanRows
+      .map((r) => r.play_order_id)
+      .filter((id) => id != null && String(id).trim() !== '')
+      .map((id) => String(id).trim());
+
+    let playMeta = { ordersById: {}, failures: [], skipped: false };
+    try {
+      playMeta = await GooglePlayOrderSyncService.batchGetOrdersByPlayOrderIds(pgIds);
+    } catch (e) {
+      if (e && e.code === 'GOOGLE_NOT_CONFIGURED') {
+        playMeta = { ordersById: {}, failures: [], skipped: true };
+      } else {
+        console.error('listAdminPlayStoreOrders: Play batch lookup failed', e.message || e);
+        playMeta = { ordersById: {}, failures: [], skipped: true };
+      }
+    }
+
+    const matchRows = await OrdersModel.findGooglePlayOrdersMatchingOrphans({
+      pgOrderIds: orphanRows.map((r) => r.play_order_id),
+      purchaseTokens: orphanRows.map((r) => r.purchase_token)
+    });
+
+    const { planById, userById } = await stitchPlansAndUsersForRows(matchRows);
+    const templateNameById = await orderTemplateStitch.buildTemplateNameByIdMap(matchRows);
+    const ctxMap = await orderLifecycleAnalyticsEnrichment.fetchLifecycleContextMapForOrderRows(matchRows);
+
+    const byPg = Object.create(null);
+    const byTok = Object.create(null);
+    for (const r of matchRows) {
+      if (r.pg_order_id != null && String(r.pg_order_id).trim() !== '') {
+        byPg[String(r.pg_order_id).trim()] = r;
+      }
+      if (r.pg_payment_id != null && String(r.pg_payment_id).trim() !== '') {
+        byTok[String(r.pg_payment_id).trim()] = r;
+      }
+    }
+
+    const failureByPg = new Map((playMeta.failures || []).map((f) => [String(f.play_order_id), f]));
+
+    let ordersOut = orphanRows.map((orph) => {
+      const pid = orph.play_order_id != null ? String(orph.play_order_id).trim() : '';
+      const tok = orph.purchase_token != null ? String(orph.purchase_token).trim() : '';
+      const rawOrder = (pid && byPg[pid]) || (tok && byTok[tok]) || null;
+
+      const internal = rawOrder
+        ? orderLifecycleAnalyticsEnrichment.applyLifecycleContextToOrderPayload(
+            mapRowToAdminOrder(rawOrder, planById, userById, templateNameById),
+            ctxMap
+          )
+        : null;
+
+      const ps = pid && playMeta.ordersById[pid] ? playMeta.ordersById[pid] : null;
+      const fail = pid ? failureByPg.get(pid) : null;
+
+      const orphan_meta = {
+        id: orph.id,
+        purchase_token: orph.purchase_token,
+        source: orph.source,
+        reason_code: orph.reason_code,
+        user_id_hint: orph.user_id_hint,
+        requested_internal_order_id: orph.requested_internal_order_id,
+        notification_type: orph.notification_type,
+        product_id: orph.product_id,
+        app_version: orph.app_version,
+        device_os: orph.device_os,
+        device_os_version: orph.device_os_version,
+        device_brand: orph.device_brand,
+        device_model: orph.device_model,
+        first_seen_at: orph.first_seen_at,
+        last_seen_at: orph.last_seen_at,
+        payload_json: orph.payload_json
+      };
+
+      let play_fetch_error = null;
+      if (!ps) {
+        if (fail && fail.message) play_fetch_error = fail.message;
+        else if (!playMeta.skipped) {
+          play_fetch_error = pid ? 'Play order not returned' : 'No Play order id on orphan row';
+        }
+      }
+
+      return {
+        play_store_order: ps,
+        internal_order: internal,
+        play_fetch_error,
+        orphan_meta
+      };
+    });
+
+    ordersOut.sort((a, b) => {
+      const ta =
+        Date.parse(a.play_store_order?.createTime || '') ||
+        Date.parse(a.orphan_meta?.last_seen_at || '') ||
+        0;
+      const tb =
+        Date.parse(b.play_store_order?.createTime || '') ||
+        Date.parse(b.orphan_meta?.last_seen_at || '') ||
+        0;
+      return tb - ta;
+    });
+
+    return res.status(200).json({
+      data: {
+        orders: ordersOut,
+        page,
+        limit,
+        total,
+        has_more: offset + orphanRows.length < total,
+        play_metadata_skipped: playMeta.skipped,
+        list_kind: 'orphan_queue'
+      }
+    });
+  } catch (err) {
+    console.error('listAdminPlayStoreOrders error:', err);
+    return res.status(500).json({
+      message: 'Failed to list Play Store orders'
     });
   }
 };

@@ -1327,7 +1327,10 @@ class AnalyticsController {
         null,
         timezone
       );
-      const data = await AnalyticsService.getTechHealthVersionAdoption(utcFilters);
+      const data = await AnalyticsService.getTechHealthVersionAdoption({
+        ...utcFilters,
+        platform: queryParams.platform
+      });
       const converted = TimezoneService.convertFromUTC(data || [], timezone);
       return res.status(HTTP_STATUS_CODES.OK).json({ data: converted });
     } catch (error) {
@@ -1705,6 +1708,31 @@ class AnalyticsController {
       return res.status(HTTP_STATUS_CODES.OK).json({ data: data || {} });
     } catch (error) {
       logger.error('Error fetching orders funnel (ClickHouse) summary:', { error: error.message, query: req.validatedQuery });
+      AnalyticsErrorHandler.handleAnalyticsErrors(error, res);
+    }
+  }
+
+  /**
+   * GET /analytics/growth-metrics/overview — parallel hub/spoke reads, merged daily series.
+   */
+  static async getGrowthMetricsOverview(req, res) {
+    try {
+      const q = req.validatedQuery;
+      const { additional, timezone } = AnalyticsController._buildOrdersFunnelClickhouseArgs(q);
+      const startCal = TimezoneService.toCalendarYmdFromHttpParam(req.query.start_date);
+      const endCal = TimezoneService.toCalendarYmdFromHttpParam(req.query.end_date);
+      const payload = {
+        start_date: startCal,
+        end_date: endCal,
+        tz: timezone,
+        product_type: q.product_type,
+        payment_gateway: q.payment_gateway,
+        app_version: q.app_version
+      };
+      const data = await AnalyticsService.getGrowthMetricsOverview(payload);
+      return res.status(HTTP_STATUS_CODES.OK).json({ data: data || { series: [] } });
+    } catch (error) {
+      logger.error('Error fetching growth metrics overview:', { error: error.message, query: req.validatedQuery });
       AnalyticsErrorHandler.handleAnalyticsErrors(error, res);
     }
   }
